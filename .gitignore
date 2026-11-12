@@ -9,3 +9,4 @@ wheels/
 screenshots/
 real_model_report.md
 selftest*.txt
+*.whl
