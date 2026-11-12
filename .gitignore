@@ -6,7 +6,7 @@ wheels/
 *.gguf
 *.part
 .pytest_cache/
-screenshots/
+/screenshots/
 real_model_report.md
 selftest*.txt
 *.whl
