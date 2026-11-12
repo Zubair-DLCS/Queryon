@@ -122,9 +122,11 @@ def ocr_image(image) -> str:
 
     pytesseract.pytesseract.tesseract_cmd = exe
     tessdata = Path(exe).parent / "tessdata"
-    config = f'--tessdata-dir "{tessdata}"' if tessdata.exists() else ""
+    if tessdata.exists():
+        # An environment variable avoids Windows path-quoting problems with --tessdata-dir.
+        os.environ["TESSDATA_PREFIX"] = str(tessdata)
     image = image.convert("L")
-    return pytesseract.image_to_string(image, lang="eng", config=config)
+    return pytesseract.image_to_string(image, lang="eng")
 
 
 # --------------------------------------------------------------------------- readers
