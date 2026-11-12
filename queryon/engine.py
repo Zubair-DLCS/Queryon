@@ -222,7 +222,6 @@ class Engine:
         chunk_words = int(min(1600, max(350, 90 / ratio)))
         chunks = make_chunks(self.doc, chunk_words)
         out_parts: list[str] = []
-        prev_tail = ""
         for i, ch in enumerate(chunks):
             if cancel is not None and cancel.is_set():
                 break
@@ -232,34 +231,31 @@ class Engine:
             header = f"\n\n_(from {ch.source})_\n\n" if len(chunks) > 1 else ""
             if on_token and header:
                 on_token(header)
-            context = (f"For context, the previous part of the simplified version ended with:\n\"{prev_tail}\"\n\n"
-                       if prev_tail else "")
             sentences = max(2, round(target / 16))
             messages = [
                 {"role": "system", "content": (
                     "You rewrite study material so students can understand it more easily. "
                     f"{STYLE_RULES} Keep the most important ideas, definitions, names and numbers, in the "
                     "original order. Never add facts or examples that are not in the text. Keep headings "
-                    "(lines starting with ##) as short headings. Stay within the word limit. "
+                    "(lines starting with ##) as short headings. Write in paragraphs; use a bullet list "
+                    "only where the original text has a list. Stay within the word limit. "
                     "Output only the rewritten text, with no introduction or comments.")},
                 {"role": "user", "content": (
-                    f"{context}Rewrite this part of \"{self.doc.name}\" in simpler English. It is now "
+                    f"Rewrite this part of \"{self.doc.name}\" in simpler English. It is now "
                     f"{ch.words} words; your version must be about {target} words "
                     f"(roughly {sentences} short sentences){' - leave out minor details' if ratio < 0.5 else ''}. "
-                    f"Use paragraphs; use bullet points only where the original lists things.\n\n"
-                    f"TEXT:\n{ch.text}")},
+                    f"Use only information from this text.\n\nTEXT:\n{ch.text}")},
             ]
-            text = self.backend.generate(messages, max_tokens=_tokens_for_words(int(target * 1.6)),
+            text = self.backend.generate(messages, max_tokens=_tokens_for_words(int(target * 1.45)),
                                          temperature=0.3, on_token=on_token, cancel=cancel)
             text = _trim_to_sentence(text.strip())
-            if count_words(text) > target * 1.4 and not (cancel is not None and cancel.is_set()):
+            if count_words(text) > target * 1.25 and not (cancel is not None and cancel.is_set()):
                 if on_progress:
                     on_progress(i, len(chunks), f"Shortening part {i + 1} of {len(chunks)}")
                 text = self._shorten(text, target, cancel) or text
                 if on_token:
                     on_token(RESET + "".join(out_parts) + header + text)
             out_parts.append(header + text)
-            prev_tail = " ".join(text.split()[-40:])
         if on_progress:
             on_progress(len(chunks), len(chunks), "Done")
         body = "".join(out_parts).strip()
@@ -372,7 +368,7 @@ class Engine:
                 "properties": {"cards": {"type": "array", "minItems": k, "maxItems": k, "items": {
                     "type": "object",
                     "properties": {"front": {"type": "string", "maxLength": 120},
-                                   "back": {"type": "string", "maxLength": 240}},
+                                   "back": {"type": "string", "maxLength": 320}},
                     "required": ["front", "back"],
                 }}},
                 "required": ["cards"],
@@ -401,7 +397,7 @@ class Engine:
         cards.sort(key=lambda c: order.get(c.source, 0))
         return cards[:n_cards]
 
-    def _fill(self, n, have, ask, verb, on_progress, cancel, chunk_words: int = 600, extra_rounds: int = 2) -> None:
+    def _fill(self, n, have, ask, verb, on_progress, cancel, chunk_words: int = 600, extra_rounds: int = 4) -> None:
         """One pass over the document, then up to extra_rounds top-up calls for items
         lost to duplicates or invalid output."""
         plan = self._allocate(n, chunk_words)
