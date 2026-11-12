@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+build/
+dist/
+wheels/
+*.gguf
+*.part
+.pytest_cache/
+screenshots/
+real_model_report.md
+selftest*.txt
