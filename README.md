@@ -53,18 +53,24 @@ Documents can be up to **4,500 words (about 8 pages)**. Longer files can be cut 
 ### Optional: cloud mode
 In **Settings**, Queryon can instead use an OpenAI-compatible API (Google Gemini, OpenAI, Groq, or a local Ollama/llama.cpp server). The student supplies their own key. This gives better quality on weak PCs but needs internet, and the document text is sent to that service.
 
-## What to expect (CPU only, 8-page document)
+## What to expect
 
-| Task | Standard model, typical laptop |
-|---|---|
-| Opening the model | 5–20 s |
-| Chat answer | starts in a few seconds |
-| 10 % / 25 % / 50 % version | ~1 / 2–3 / 4–6 min, shown as it is written |
-| Quiz (10 questions) | ~1–3 min |
+Measured on GitHub's standard Windows machine (4 CPU cores, no graphics card) with a one-page, 489-word lecture. Everything runs on the processor; a typical laptop is similar, an older one slower.
 
-Results are saved, so reopening the same document shows earlier summaries, quizzes and cards instantly.
+| Task | Light (1.5B) | Standard (3B) |
+|---|---|---|
+| Opening the model | 1–2 s | 3 s |
+| First chat answer (the model reads the whole document first) | ~12 s | ~35 s |
+| Follow-up chat answers | 1–4 s | 2–18 s |
+| 50 % / 25 % / 10 % version | 60 / 40 / 17 s | 115 / 120 / 36 s |
+| Quiz, 5 questions | ~60 s | ~95 s |
+| Flashcards, 8 cards | ~55 s | ~85 s |
 
-**Limitations.** Small offline models can make mistakes, miss nuance, or produce a simplified version a little longer or shorter than the target; the actual percentage is always shown. Answers carry page references so they can be checked. English only. OCR works well on clear printed text, poorly on blurry photos, and not on handwriting.
+The simplified versions grow roughly in proportion to document length, so for a full 8-page (4,500-word) document expect about **5–8 minutes (Light) or 10–15 minutes (Standard)** for the 50 % version. The text appears on screen as it is written, so students can start reading straight away. Results are saved, so reopening the same document later shows earlier versions, quizzes and cards instantly.
+
+In the same tests the simplified versions came out at 53 % / 34 % / 14 % of the original for the Standard model (targets 50 / 25 / 10) and 66 % / 33 % / 9 % for Light. The actual percentage is always shown next to the result.
+
+**Limitations.** Small offline models make mistakes. In testing, the Standard model marked the wrong answer on 1 of 5 quiz questions, and a simplified version occasionally states a detail slightly wrongly. The Light model's flashcards sometimes copy a sentence that does not fit the term. Simplified versions can also be longer or shorter than the target. Answers carry page references so they can be checked. English only. OCR works well on clear printed text, poorly on blurry photos, and not on handwriting.
 
 ## How it works
 
