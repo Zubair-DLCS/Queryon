@@ -125,6 +125,31 @@ def _extract_json(text: str):
     return None
 
 
+def _json_items(text: str, key: str) -> list[dict]:
+    """Items of the array `key`, salvaging complete items even if the JSON was cut off
+    (which happens when a model runs out of output budget mid-answer)."""
+    data = _extract_json(text)
+    if isinstance(data, dict) and isinstance(data.get(key), list):
+        return [x for x in data[key] if isinstance(x, dict)]
+    m = re.search(r'"%s"\s*:\s*\[' % re.escape(key), text)
+    if not m:
+        return []
+    dec = json.JSONDecoder(strict=False)
+    items, pos = [], m.end()
+    while True:
+        while pos < len(text) and text[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= len(text) or text[pos] != "{":
+            break
+        try:
+            obj, pos = dec.raw_decode(text, pos)
+        except ValueError:
+            break
+        if isinstance(obj, dict):
+            items.append(obj)
+    return items
+
+
 # --------------------------------------------------------------------------- results
 
 @dataclass
@@ -171,15 +196,21 @@ class Engine:
 
     # ----------------------------------------------------------------- chat
 
+    def _cite_example(self) -> str:
+        labels = [b.label for b in self.doc.blocks]
+        return labels[min(1, len(labels) - 1)]
+
     def _chat_system(self) -> str:
+        ex = self._cite_example()
         return (
             f"You are Queryon, a patient study assistant helping a student understand the document "
             f"\"{self.doc.name}\". The full document is below; each section starts with a marker "
-            f"such as [Page 3] or [Slide 2].\n\n"
+            f"in square brackets, such as [{ex}].\n\n"
             "Rules:\n"
             "- Answer using ONLY the document. If the answer is not in it, say: "
             "\"The document does not cover this.\" and, if useful, say what it does cover.\n"
-            "- After each fact, cite where it is, like (Page 3) or (Slide 2).\n"
+            f"- After each fact, cite the marker of the section it comes from in round brackets, "
+            f"like ({ex}). Use only markers that appear in the document.\n"
             f"- {STYLE_RULES}\n"
             "- Keep answers focused: a short paragraph or a few bullet points unless asked for more.\n\n"
             "=== DOCUMENT START ===\n"
@@ -282,7 +313,8 @@ class Engine:
             {"role": "user", "content": (
                 f"The document below is short, so give ONLY its {n} most important key points as a "
                 f"bullet list of exactly {n} lines starting with '- ', each one short sentence in simple "
-                f"English, followed by the source in brackets like (Page 1). Output only the list.\n\n"
+                f"English, followed by its section marker in round brackets, like ({self._cite_example()}). "
+                f"Output only the list.\n\n"
                 f"DOCUMENT:\n{self.doc.labelled_text()}")},
         ]
         text = self.backend.generate(messages, max_tokens=50 * n + 40, temperature=0.3,
@@ -346,9 +378,9 @@ class Engine:
                     f"Write {k} multiple-choice question{'s' if k > 1 else ''} about this text, each about "
                     f"a different fact.{avoid_txt}\n\nTEXT:\n{ch.text}")},
             ]
-            raw = self.backend.generate(messages, max_tokens=170 * k + 60, temperature=0.5,
+            raw = self.backend.generate(messages, max_tokens=280 * k + 120, temperature=0.5,
                                         cancel=cancel, json_schema=schema)
-            for q in (_extract_json(raw) or {}).get("questions", [])[:k]:
+            for q in _json_items(raw, "questions")[:k]:
                 clean = _clean_question(q, ch.source, rng)
                 if clean and _is_new(clean.question, [x.question for x in questions]):
                     questions.append(clean)
@@ -383,9 +415,9 @@ class Engine:
                     "most important terms, facts and ideas. Respond with JSON only.")},
                 {"role": "user", "content": f"Make {k} flashcard{'s' if k > 1 else ''} from this text.{avoid_txt}\n\nTEXT:\n{ch.text}"},
             ]
-            raw = self.backend.generate(messages, max_tokens=80 * k + 60, temperature=0.5,
+            raw = self.backend.generate(messages, max_tokens=150 * k + 100, temperature=0.5,
                                         cancel=cancel, json_schema=schema)
-            for c in (_extract_json(raw) or {}).get("cards", [])[:k]:
+            for c in _json_items(raw, "cards")[:k]:
                 front = str(c.get("front", "")).strip()
                 back = _shorten_answer(str(c.get("back", "")).strip())
                 if front and back and _is_new(front, [x.front for x in cards]):

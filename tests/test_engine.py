@@ -153,3 +153,20 @@ def test_markdown_and_exports(tmp_path):
     quiz_docx(eng.quiz(5), "lecture.pdf", str(tmp_path / "q.docx"))
     cards_docx(eng.flashcards(5), "lecture.pdf", str(tmp_path / "c.docx"))
     assert all((tmp_path / f).stat().st_size > 1000 for f in ("s.docx", "q.docx", "c.docx"))
+
+
+def test_truncated_json_is_salvaged():
+    from queryon.engine import _json_items
+
+    raw = '{"cards": [{"front": "A", "back": "one"}, {"front": "B", "back": "two"}, {"front": "C", "ba'
+    assert [c["front"] for c in _json_items(raw, "cards")] == ["A", "B"]
+    assert _json_items('{"cards": []}', "cards") == []
+    assert _json_items("nonsense", "cards") == []
+
+
+def test_citation_examples_use_document_units():
+    fb = FakeBackend()
+    doc = Document(Path("notes.md"), "Markdown", [Block("Part 1", "alpha " * 50), Block("Part 2", "beta " * 50)])
+    Engine(fb, doc).chat("q", [])
+    system = fb.calls[0]["messages"][0]["content"]
+    assert "(Part 2)" in system and "Page" not in system and "Slide" not in system
