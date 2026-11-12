@@ -111,6 +111,7 @@ def main():
     for c in cards:
         out.append(f"- **{c.front}**: {c.back} ({c.source})\n")
 
+    out.append(f"\nItem stats (kept / dropped as duplicate / invalid): {eng.stats}\n")
     out.append(f"\nTotal: {time.time() - t0:.0f} s\n")
     report.write_text("\n".join(out), encoding="utf-8")
     print("Report written to", report)

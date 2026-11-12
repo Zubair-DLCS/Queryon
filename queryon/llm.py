@@ -40,6 +40,7 @@ class Backend:
         on_token: TokenCallback | None = None,
         cancel: threading.Event | None = None,
         json_schema: dict | None = None,
+        seed: int | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -70,7 +71,8 @@ class LocalBackend(Backend):
     def count_tokens(self, text: str) -> int:
         return len(self.llm.tokenize(text.encode("utf-8"), add_bos=False, special=True))
 
-    def generate(self, messages, max_tokens=700, temperature=0.3, on_token=None, cancel=None, json_schema=None):
+    def generate(self, messages, max_tokens=700, temperature=0.3, on_token=None, cancel=None, json_schema=None,
+                 seed=None):
         kwargs = dict(
             messages=messages,
             max_tokens=max_tokens,
@@ -81,6 +83,8 @@ class LocalBackend(Backend):
         )
         if json_schema is not None:
             kwargs["response_format"] = {"type": "json_object", "schema": json_schema}
+        if seed is not None:
+            kwargs["seed"] = seed
         out: list[str] = []
         with self._lock:
             stream = self.llm.create_chat_completion(**kwargs)
@@ -118,7 +122,8 @@ class CloudBackend(Backend):
         self.name = f"Cloud · {model}"
         self.context_tokens = 32000
 
-    def generate(self, messages, max_tokens=700, temperature=0.3, on_token=None, cancel=None, json_schema=None):
+    def generate(self, messages, max_tokens=700, temperature=0.3, on_token=None, cancel=None, json_schema=None,
+                 seed=None):
         import requests
 
         body = {

@@ -19,7 +19,8 @@ class FakeBackend(Backend):
         self.calls = []
         self.verbosity = verbosity  # >1 imitates a model that writes too much
 
-    def generate(self, messages, max_tokens=700, temperature=0.3, on_token=None, cancel=None, json_schema=None):
+    def generate(self, messages, max_tokens=700, temperature=0.3, on_token=None, cancel=None, json_schema=None,
+                 seed=None):
         self.calls.append({"messages": messages, "max_tokens": max_tokens, "schema": json_schema})
         user = messages[-1]["content"]
         if json_schema and "questions" in json_schema["properties"]:
@@ -170,3 +171,10 @@ def test_citation_examples_use_document_units():
     Engine(fb, doc).chat("q", [])
     system = fb.calls[0]["messages"][0]["content"]
     assert "(Part 2)" in system and "Page" not in system and "Slide" not in system
+
+
+def test_echoed_instructions_are_dropped():
+    from queryon.engine import _looks_like_instruction
+
+    assert _looks_like_instruction("These cards already exist: make flashcards about other terms")
+    assert not _looks_like_instruction("Chlorophyll absorbs red and blue light")

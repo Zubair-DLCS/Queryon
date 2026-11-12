@@ -27,7 +27,8 @@ class DemoBackend(Backend):
     context_tokens = 8192
     qi = 0
 
-    def generate(self, messages, max_tokens=700, temperature=0.3, on_token=None, cancel=None, json_schema=None):
+    def generate(self, messages, max_tokens=700, temperature=0.3, on_token=None, cancel=None, json_schema=None,
+                 seed=None):
         user = messages[-1]["content"]
         if json_schema and "questions" in json_schema["properties"]:
             k = json_schema["properties"]["questions"]["minItems"]

@@ -193,6 +193,10 @@ class Engine:
     def __init__(self, backend: Backend, doc: Document):
         self.backend = backend
         self.doc = doc
+        self.stats: dict[str, int] = {}  # why generated items were kept or dropped
+
+    def _count(self, key: str) -> None:
+        self.stats[key] = self.stats.get(key, 0) + 1
 
     # ----------------------------------------------------------------- chat
 
@@ -347,7 +351,7 @@ class Engine:
         rng = random.Random(seed)
         questions: list[Question] = []
 
-        def ask(ch: Chunk, k: int) -> None:
+        def ask(ch: Chunk, k: int, attempt: int) -> None:
             # The model writes the right answer as text, not as an option number: small models
             # are unreliable at pointing to "option 2" but good at stating the answer itself.
             schema = {
@@ -364,8 +368,8 @@ class Engine:
                 }}},
                 "required": ["questions"],
             }
-            avoid = [q.question for q in questions]
-            avoid_txt = ("\nThese questions were already asked; ask about different facts:\n- " + "\n- ".join(avoid)) if avoid else ""
+            avoid = [q.question for q in questions if q.source == ch.source]
+            avoid_txt = (" Do not ask again about: " + "; ".join(avoid) + ".") if avoid else ""
             messages = [
                 {"role": "system", "content": (
                     "You write fair multiple-choice questions that test understanding of study material. "
@@ -378,11 +382,16 @@ class Engine:
                     f"Write {k} multiple-choice question{'s' if k > 1 else ''} about this text, each about "
                     f"a different fact.{avoid_txt}\n\nTEXT:\n{ch.text}")},
             ]
-            raw = self.backend.generate(messages, max_tokens=280 * k + 120, temperature=0.5,
-                                        cancel=cancel, json_schema=schema)
+            raw = self.backend.generate(messages, max_tokens=280 * k + 120, temperature=0.5 + 0.15 * attempt,
+                                        cancel=cancel, json_schema=schema, seed=rng.randrange(1 << 30))
             for q in _json_items(raw, "questions")[:k]:
                 clean = _clean_question(q, ch.source, rng)
-                if clean and _is_new(clean.question, [x.question for x in questions]):
+                if clean is None or _looks_like_instruction(clean.question):
+                    self._count("quiz: invalid")
+                elif not _is_new(clean.question, [x.question for x in questions]):
+                    self._count("quiz: duplicate")
+                else:
+                    self._count("quiz: kept")
                     questions.append(clean)
 
         self._fill(n_questions, lambda: len(questions), ask, "Writing questions for", on_progress, cancel,
@@ -394,7 +403,9 @@ class Engine:
     def flashcards(self, n_cards: int = 12, on_progress=None, cancel=None) -> list[Card]:
         cards: list[Card] = []
 
-        def ask(ch: Chunk, k: int) -> None:
+        rng = random.Random()
+
+        def ask(ch: Chunk, k: int, attempt: int) -> None:
             schema = {
                 "type": "object",
                 "properties": {"cards": {"type": "array", "minItems": k, "maxItems": k, "items": {
@@ -405,8 +416,8 @@ class Engine:
                 }}},
                 "required": ["cards"],
             }
-            avoid = [c.front for c in cards]
-            avoid_txt = ("\nThese cards already exist; make cards about other terms:\n- " + "\n- ".join(avoid)) if avoid else ""
+            avoid = [c.front for c in cards if c.source == ch.source]
+            avoid_txt = (" Skip these terms: " + "; ".join(avoid) + ".") if avoid else ""
             messages = [
                 {"role": "system", "content": (
                     "You make revision flashcards from study material. The front is a key term or a "
@@ -415,12 +426,17 @@ class Engine:
                     "most important terms, facts and ideas. Respond with JSON only.")},
                 {"role": "user", "content": f"Make {k} flashcard{'s' if k > 1 else ''} from this text.{avoid_txt}\n\nTEXT:\n{ch.text}"},
             ]
-            raw = self.backend.generate(messages, max_tokens=150 * k + 100, temperature=0.5,
-                                        cancel=cancel, json_schema=schema)
+            raw = self.backend.generate(messages, max_tokens=150 * k + 100, temperature=0.5 + 0.15 * attempt,
+                                        cancel=cancel, json_schema=schema, seed=rng.randrange(1 << 30))
             for c in _json_items(raw, "cards")[:k]:
                 front = str(c.get("front", "")).strip()
                 back = _shorten_answer(str(c.get("back", "")).strip())
-                if front and back and _is_new(front, [x.front for x in cards]):
+                if not front or not back or _looks_like_instruction(front + " " + back):
+                    self._count("cards: invalid")
+                elif not _is_new(front, [x.front for x in cards]):
+                    self._count("cards: duplicate")
+                else:
+                    self._count("cards: kept")
                     cards.append(Card(front, back, ch.source))
 
         cw = self._item_chunk_words(n_cards)
@@ -429,7 +445,7 @@ class Engine:
         cards.sort(key=lambda c: order.get(c.source, 0))
         return cards[:n_cards]
 
-    def _fill(self, n, have, ask, verb, on_progress, cancel, chunk_words: int = 600, extra_rounds: int = 4) -> None:
+    def _fill(self, n, have, ask, verb, on_progress, cancel, chunk_words: int = 600, extra_rounds: int = 5) -> None:
         """One pass over the document, then up to extra_rounds top-up calls for items
         lost to duplicates or invalid output."""
         plan = self._allocate(n, chunk_words)
@@ -439,8 +455,10 @@ class Engine:
                 return
             if on_progress:
                 on_progress(i, steps, f"{verb} {ch.source}")
-            ask(ch, k)
-        chunks = sorted((c for c, _ in plan), key=lambda c: -c.words)
+            ask(ch, k, 0)
+        # Top-ups: rotate through all sections (not just the biggest), with more randomness
+        # each time, since retrying the same section the same way gives the same rejects.
+        chunks = make_chunks(self.doc, chunk_words)
         for r in range(extra_rounds):
             missing = n - have()
             if missing <= 0 or (cancel is not None and cancel.is_set()):
@@ -448,7 +466,7 @@ class Engine:
             ch = chunks[r % len(chunks)]
             if on_progress:
                 on_progress(steps, steps + 1, f"Adding {missing} more")
-            ask(ch, min(missing, 4))
+            ask(ch, min(missing + 1, 4), 1 + r // len(chunks))
         if on_progress:
             on_progress(1, 1, "Done")
 
@@ -456,6 +474,16 @@ class Engine:
 _STOP = set("a an the of in on at to for from by with and or is are was were be been it its this that "
             "what which who whom how why when where does do did can could would should into as than "
             "then their there these those about main primarily mainly part".split())
+
+
+_INSTRUCTION_RE = re.compile(
+    r"already (exist|asked|done)|skip these|do not ask again|make (flash)?cards|multiple-choice question|respond with json",
+    re.I)
+
+
+def _looks_like_instruction(text: str) -> bool:
+    """Small models sometimes echo the prompt's own instructions back as content."""
+    return bool(_INSTRUCTION_RE.search(text))
 
 
 def _content_words(s: str) -> set[str]:
