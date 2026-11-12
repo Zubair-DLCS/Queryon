@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSizePolicy, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from ..engine import ChatTurn
+from ..engine import RESET, ChatTurn
 from ..export import markdown_to_html
 from .style import BAD, CHAT_CSS, GOOD, MUTED
 
@@ -340,7 +340,10 @@ class SummaryPanel(Panel):
             return engine.simplify(ratio, on_token=job.emit_token, on_progress=job.emit_progress, cancel=job.cancel)
 
         def on_token(t):
-            self.buffer += t
+            if t.startswith(RESET):  # a part was shortened: replace what is shown
+                self.buffer = t[len(RESET):]
+            else:
+                self.buffer += t
             self._dirty = True
 
         def on_progress(done, total, msg):

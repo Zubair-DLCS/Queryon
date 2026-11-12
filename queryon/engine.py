@@ -18,6 +18,8 @@ from .llm import Backend
 
 ProgressCB = "Callable[[int, int, str], None]"
 
+RESET = "\x00"  # streamed-token prefix meaning "replace the text shown so far"
+
 STYLE_RULES = (
     "Write in clear, simple English that a first-year student can follow: short sentences, "
     "everyday words, and a brief explanation the first time a technical term appears."
@@ -208,13 +210,16 @@ class Engine:
     # ----------------------------------------------------------------- simplified versions
 
     def simplify(self, ratio: float, on_token=None, on_progress=None, cancel=None) -> SummaryResult:
+        """on_token receives streamed text; a token starting with RESET replaces everything
+        shown so far (used when a part is shortened after it was written)."""
         total = self.doc.words
         target_total = total * ratio
         if target_total < 120:
             return self._key_points(ratio, on_token, cancel)
 
-        # Each part should produce at least ~90 words, or small models lose the thread.
-        chunk_words = int(min(1600, max(550, 90 / ratio)))
+        # Small models follow "about N words" much better for short outputs, so parts are
+        # small; each part should still produce at least ~90 words to keep the thread.
+        chunk_words = int(min(1600, max(350, 90 / ratio)))
         chunks = make_chunks(self.doc, chunk_words)
         out_parts: list[str] = []
         prev_tail = ""
@@ -229,22 +234,30 @@ class Engine:
                 on_token(header)
             context = (f"For context, the previous part of the simplified version ended with:\n\"{prev_tail}\"\n\n"
                        if prev_tail else "")
+            sentences = max(2, round(target / 16))
             messages = [
                 {"role": "system", "content": (
                     "You rewrite study material so students can understand it more easily. "
-                    f"{STYLE_RULES} Keep every key idea, definition, name, number and example that fits "
-                    "in the length you are given, in the original order. Never add facts that are "
-                    "not in the text. Keep headings (lines starting with ##) as short headings. "
+                    f"{STYLE_RULES} Keep the most important ideas, definitions, names and numbers, in the "
+                    "original order. Never add facts or examples that are not in the text. Keep headings "
+                    "(lines starting with ##) as short headings. Stay within the word limit. "
                     "Output only the rewritten text, with no introduction or comments.")},
                 {"role": "user", "content": (
-                    f"{context}Rewrite this part of \"{self.doc.name}\" in simpler English in about "
-                    f"{target} words (it is now {ch.words} words). "
+                    f"{context}Rewrite this part of \"{self.doc.name}\" in simpler English. It is now "
+                    f"{ch.words} words; your version must be about {target} words "
+                    f"(roughly {sentences} short sentences){' - leave out minor details' if ratio < 0.5 else ''}. "
                     f"Use paragraphs; use bullet points only where the original lists things.\n\n"
                     f"TEXT:\n{ch.text}")},
             ]
-            text = self.backend.generate(messages, max_tokens=_tokens_for_words(int(target * 1.35)),
+            text = self.backend.generate(messages, max_tokens=_tokens_for_words(int(target * 1.6)),
                                          temperature=0.3, on_token=on_token, cancel=cancel)
             text = _trim_to_sentence(text.strip())
+            if count_words(text) > target * 1.4 and not (cancel is not None and cancel.is_set()):
+                if on_progress:
+                    on_progress(i, len(chunks), f"Shortening part {i + 1} of {len(chunks)}")
+                text = self._shorten(text, target, cancel) or text
+                if on_token:
+                    on_token(RESET + "".join(out_parts) + header + text)
             out_parts.append(header + text)
             prev_tail = " ".join(text.split()[-40:])
         if on_progress:
@@ -253,18 +266,36 @@ class Engine:
         body_words = count_words(re.sub(r"_\(from [^)]*\)_", "", body))
         return SummaryResult(ratio, body, total, body_words, "rewrite")
 
+    def _shorten(self, text: str, target: int, cancel) -> str:
+        messages = [
+            {"role": "system", "content": (
+                f"You shorten text for students. {STYLE_RULES} Keep the most important facts, drop "
+                "minor details and repetition, never add anything new. Keep ## headings. "
+                "Output only the shortened text.")},
+            {"role": "user", "content": f"Shorten this to about {target} words:\n\n{text}"},
+        ]
+        out = self.backend.generate(messages, max_tokens=_tokens_for_words(int(target * 1.3)),
+                                    temperature=0.2, cancel=cancel)
+        out = _trim_to_sentence(out.strip())
+        return out if count_words(out) >= target * 0.4 else ""
+
     def _key_points(self, ratio, on_token, cancel) -> SummaryResult:
         n = 3 if self.doc.words < 400 else 5
         messages = [
             {"role": "system", "content": f"You help students revise. {STYLE_RULES} Never add facts that are not in the text."},
             {"role": "user", "content": (
-                f"The document below is short, so give its {n} most important key points as a bullet "
-                f"list (lines starting with '- '), each one sentence, in simple English, followed by "
-                f"the source in brackets like (Page 1). Output only the list.\n\n"
+                f"The document below is short, so give ONLY its {n} most important key points as a "
+                f"bullet list of exactly {n} lines starting with '- ', each one short sentence in simple "
+                f"English, followed by the source in brackets like (Page 1). Output only the list.\n\n"
                 f"DOCUMENT:\n{self.doc.labelled_text()}")},
         ]
-        text = self.backend.generate(messages, max_tokens=60 * n + 40, temperature=0.3,
+        text = self.backend.generate(messages, max_tokens=50 * n + 40, temperature=0.3,
                                      on_token=on_token, cancel=cancel).strip()
+        bullets = [l for l in text.splitlines() if re.match(r"^\s*([-*•]|\d+[.)])\s+", l)]
+        if len(bullets) > n:  # small models often ignore the count
+            text = "\n".join(bullets[:n])
+            if on_token:
+                on_token(RESET + text)
         return SummaryResult(ratio, text, self.doc.words, count_words(text), "key points")
 
     # ----------------------------------------------------------------- quiz & flashcards
@@ -280,46 +311,56 @@ class Engine:
             alloc[max(range(len(chunks)), key=lambda i: alloc[i])] -= 1
         return [(c, k) for c, k in zip(chunks, alloc) if k > 0]
 
+    def _item_chunk_words(self, n_items: int) -> int:
+        # About two items per section, so each question points to a specific place.
+        return int(min(600, max(200, self.doc.words * 2 / max(1, n_items))))
+
     def quiz(self, n_questions: int = 10, on_progress=None, cancel=None, seed: int | None = None) -> list[Question]:
         rng = random.Random(seed)
         questions: list[Question] = []
 
         def ask(ch: Chunk, k: int) -> None:
+            # The model writes the right answer as text, not as an option number: small models
+            # are unreliable at pointing to "option 2" but good at stating the answer itself.
             schema = {
                 "type": "object",
                 "properties": {"questions": {"type": "array", "minItems": k, "maxItems": k, "items": {
                     "type": "object",
                     "properties": {
                         "question": {"type": "string"},
-                        "options": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "string"}},
-                        "correct_option": {"type": "integer", "minimum": 0, "maximum": 3},
+                        "correct_answer": {"type": "string"},
+                        "wrong_answers": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "string"}},
                         "explanation": {"type": "string"},
                     },
-                    "required": ["question", "options", "correct_option", "explanation"],
+                    "required": ["question", "correct_answer", "wrong_answers", "explanation"],
                 }}},
                 "required": ["questions"],
             }
-            avoid = [q.question for q in questions if q.source == ch.source]
-            avoid_txt = ("\nDo not repeat these questions that were already asked:\n- " + "\n- ".join(avoid)) if avoid else ""
+            avoid = [q.question for q in questions]
+            avoid_txt = ("\nThese questions were already asked; ask about different facts:\n- " + "\n- ".join(avoid)) if avoid else ""
             messages = [
                 {"role": "system", "content": (
                     "You write fair multiple-choice questions that test understanding of study material. "
-                    "Every question must be answerable from the text alone. Each has exactly 4 options: "
-                    "one correct and three plausible but clearly wrong. Do not use 'All of the above' or "
-                    "'None of the above'. The explanation says in one simple sentence why the answer is "
-                    "correct. Respond with JSON only.")},
+                    "Every question must be answerable from the text alone. For each question give the "
+                    "correct answer, then three wrong answers that sound plausible but are clearly wrong "
+                    "according to the text. Answers are short phrases. Do not use 'All of the above' or "
+                    "'None of the above'. The explanation says in one simple sentence why the correct "
+                    "answer is right, using the text. Respond with JSON only.")},
                 {"role": "user", "content": (
-                    f"Write {k} multiple-choice question{'s' if k > 1 else ''} about this text. Cover "
-                    f"different ideas, not the same one twice.{avoid_txt}\n\nTEXT:\n{ch.text}")},
+                    f"Write {k} multiple-choice question{'s' if k > 1 else ''} about this text, each about "
+                    f"a different fact.{avoid_txt}\n\nTEXT:\n{ch.text}")},
             ]
-            raw = self.backend.generate(messages, max_tokens=230 * k + 60, temperature=0.5,
+            raw = self.backend.generate(messages, max_tokens=170 * k + 60, temperature=0.5,
                                         cancel=cancel, json_schema=schema)
             for q in (_extract_json(raw) or {}).get("questions", [])[:k]:
                 clean = _clean_question(q, ch.source, rng)
                 if clean and _is_new(clean.question, [x.question for x in questions]):
                     questions.append(clean)
 
-        self._fill(n_questions, lambda: len(questions), ask, "Writing questions for", on_progress, cancel)
+        self._fill(n_questions, lambda: len(questions), ask, "Writing questions for", on_progress, cancel,
+                   chunk_words=self._item_chunk_words(n_questions))
+        order = {c.source: i for i, c in enumerate(make_chunks(self.doc, self._item_chunk_words(n_questions)))}
+        questions.sort(key=lambda q: order.get(q.source, 0))
         return questions[:n_questions]
 
     def flashcards(self, n_cards: int = 12, on_progress=None, cancel=None) -> list[Card]:
@@ -330,38 +371,40 @@ class Engine:
                 "type": "object",
                 "properties": {"cards": {"type": "array", "minItems": k, "maxItems": k, "items": {
                     "type": "object",
-                    "properties": {"front": {"type": "string"}, "back": {"type": "string"}},
+                    "properties": {"front": {"type": "string", "maxLength": 120},
+                                   "back": {"type": "string", "maxLength": 240}},
                     "required": ["front", "back"],
                 }}},
                 "required": ["cards"],
             }
-            avoid = [c.front for c in cards if c.source == ch.source]
-            avoid_txt = ("\nThese cards already exist, make different ones:\n- " + "\n- ".join(avoid)) if avoid else ""
+            avoid = [c.front for c in cards]
+            avoid_txt = ("\nThese cards already exist; make cards about other terms:\n- " + "\n- ".join(avoid)) if avoid else ""
             messages = [
                 {"role": "system", "content": (
-                    "You make revision flashcards from study material. The front is a short question or "
-                    "a key term; the back is a short, simple answer or definition (one or two sentences) "
-                    "taken from the text. Focus on the most important terms, facts and ideas. "
-                    "Respond with JSON only.")},
+                    "You make revision flashcards from study material. The front is a key term or a "
+                    "short question. The back is a short answer in your own simple words: ONE sentence, "
+                    "under 25 words. Do not copy whole sentences or paragraphs from the text. Focus on the "
+                    "most important terms, facts and ideas. Respond with JSON only.")},
                 {"role": "user", "content": f"Make {k} flashcard{'s' if k > 1 else ''} from this text.{avoid_txt}\n\nTEXT:\n{ch.text}"},
             ]
-            raw = self.backend.generate(messages, max_tokens=90 * k + 60, temperature=0.5,
+            raw = self.backend.generate(messages, max_tokens=80 * k + 60, temperature=0.5,
                                         cancel=cancel, json_schema=schema)
             for c in (_extract_json(raw) or {}).get("cards", [])[:k]:
-                front, back = str(c.get("front", "")).strip(), str(c.get("back", "")).strip()
+                front = str(c.get("front", "")).strip()
+                back = _shorten_answer(str(c.get("back", "")).strip())
                 if front and back and _is_new(front, [x.front for x in cards]):
                     cards.append(Card(front, back, ch.source))
 
-        self._fill(n_cards, lambda: len(cards), ask, "Making flashcards for", on_progress, cancel)
-        # keep document order
-        order = {c.source: i for i, (c, _) in enumerate(self._allocate(max(1, n_cards)))}
+        cw = self._item_chunk_words(n_cards)
+        self._fill(n_cards, lambda: len(cards), ask, "Making flashcards for", on_progress, cancel, chunk_words=cw)
+        order = {c.source: i for i, c in enumerate(make_chunks(self.doc, cw))}
         cards.sort(key=lambda c: order.get(c.source, 0))
         return cards[:n_cards]
 
-    def _fill(self, n, have, ask, verb, on_progress, cancel, extra_rounds: int = 2) -> None:
+    def _fill(self, n, have, ask, verb, on_progress, cancel, chunk_words: int = 600, extra_rounds: int = 2) -> None:
         """One pass over the document, then up to extra_rounds top-up calls for items
         lost to duplicates or invalid output."""
-        plan = self._allocate(n)
+        plan = self._allocate(n, chunk_words)
         steps = len(plan)
         for i, (ch, k) in enumerate(plan):
             if cancel is not None and cancel.is_set():
@@ -377,15 +420,42 @@ class Engine:
             ch = chunks[r % len(chunks)]
             if on_progress:
                 on_progress(steps, steps + 1, f"Adding {missing} more")
-            ask(ch, min(missing, 5))
+            ask(ch, min(missing, 4))
         if on_progress:
             on_progress(1, 1, "Done")
 
 
+_STOP = set("a an the of in on at to for from by with and or is are was were be been it its this that "
+            "what which who whom how why when where does do did can could would should into as than "
+            "then their there these those about main primarily mainly part".split())
+
+
+def _content_words(s: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", s.lower()) if w not in _STOP and len(w) > 1}
+
+
 def _is_new(text: str, existing: list[str]) -> bool:
-    norm = lambda s: re.sub(r"\W+", " ", s.lower()).strip()
-    t = norm(text)
-    return bool(t) and all(norm(e) != t for e in existing)
+    """False if text repeats an existing item, even when reworded."""
+    t = _content_words(text)
+    if not t:
+        return False
+    for e in existing:
+        o = _content_words(e)
+        if o and len(t & o) / len(t | o) >= 0.6:
+            return False
+    return True
+
+
+def _shorten_answer(text: str, max_words: int = 35) -> str:
+    """Flashcard backs: keep the first sentence or two, at most max_words words."""
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    out = sentences[0]
+    if len(sentences) > 1 and count_words(out) < 12:
+        out += " " + sentences[1]
+    words = out.split()
+    if len(words) > max_words:
+        out = " ".join(words[:max_words]).rstrip(",;:") + "…"
+    return out
 
 
 _PREFIX_RE = re.compile(r"^\s*(?:\(?[A-Da-d1-4][).:]\s+|option\s+[A-Da-d][).:]?\s*)", re.I)
@@ -394,15 +464,16 @@ _PREFIX_RE = re.compile(r"^\s*(?:\(?[A-Da-d1-4][).:]\s+|option\s+[A-Da-d][).:]?\
 def _clean_question(q: dict, source: str, rng: random.Random) -> Question | None:
     try:
         text = str(q["question"]).strip()
-        options = [_PREFIX_RE.sub("", str(o)).strip() for o in q["options"]]
-        answer = int(q["correct_option"])
-    except (KeyError, TypeError, ValueError):
+        correct = _PREFIX_RE.sub("", str(q["correct_answer"])).strip()
+        wrong = [_PREFIX_RE.sub("", str(o)).strip() for o in q["wrong_answers"]]
+    except (KeyError, TypeError):
         return None
-    if not text or len(options) != 4 or not 0 <= answer < 4 or any(not o for o in options):
+    options = [correct] + wrong
+    if not text or len(options) != 4 or any(not o for o in options):
         return None
-    if len({o.lower() for o in options}) < 4:
+    if len({o.lower().rstrip(".") for o in options}) < 4:
+        return None  # a "wrong" answer that equals the right one
+    if any(w in " ".join(options).lower() for w in ("all of the above", "none of the above")):
         return None
-    correct = options[answer]
-    if not any(w in " ".join(options).lower() for w in ("all of the above", "none of the above", "both a")):
-        rng.shuffle(options)  # small models put the answer in slot A far too often
+    rng.shuffle(options)
     return Question(text, options, options.index(correct), str(q.get("explanation", "")).strip(), source)

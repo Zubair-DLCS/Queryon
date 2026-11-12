@@ -43,7 +43,7 @@ class DemoBackend(Backend):
                      "The Calvin cycle builds glucose from carbon dioxide."),
                     ("Why do farmers use greenhouses?", ["To control the factors that limit photosynthesis", "To keep birds away",
                      "To reduce sunlight", "To remove oxygen"], "Greenhouses control light, temperature and CO2.")]
-            out = json.dumps({"questions": [{"question": q, "options": o, "correct_option": 0, "explanation": e}
+            out = json.dumps({"questions": [{"question": q, "correct_answer": o[0], "wrong_answers": o[1:], "explanation": e}
                                             for q, o, e in [bank[(self.qi + j) % len(bank)] for j in range(k)]]})
             self.qi += k
         elif json_schema:
